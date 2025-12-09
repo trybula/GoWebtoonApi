@@ -17,13 +17,16 @@ var validKeyHash []byte
 // loadKeyHash reads the hash from the text file once when the program starts
 func loadKeyHash() {
 	// Read the hash string from file
-	data, err := os.ReadFile("valid_key_hash.txt")
-	if err != nil {
-		log.Fatal("Could not read valid_key_hash.txt: ", err)
-	}
-
+	data := os.Getenv("API_KEY_HASH")
+	//fmt.Println(data)
+	/*
+		data, err := os.ReadFile("valid_key_hash.txt")
+		if err != nil {
+			log.Fatal("Could not read valid_key_hash.txt: ", err)
+		}
+	*/
 	// Clean up whitespace/newlines
-	cleanHex := strings.TrimSpace(string(data))
+	cleanHex := strings.TrimSpace(data)
 
 	// Decode hex string back to bytes for comparison
 	decoded, err := hex.DecodeString(cleanHex)

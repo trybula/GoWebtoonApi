@@ -91,17 +91,36 @@ func start_job(c *gin.Context) {
 
 	// run download in background (do not use c or take pointers into jobs slice)
 	go func(jobID int) {
-		// local progress to avoid pointer into slice element while it may be removed
+		// 1. THIS MUST BE FIRST
+		// This function will execute when the surrounding function finishes
+		// (either naturally or via panic)
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("Recovered from panic in Job %d: %v\n", jobID, r)
+				for i := range jobs {
+					if jobs[i].ID == jobID {
+						jobs[i].Progress = -1
+						break
+					}
+				}
+				// Optional: You might want to update the job status to "Failed" here
+				// so it doesn't stay stuck forever.
+				// Note: You need to handle locking carefully here if you access 'jobs'.
+			}
+		}()
+
+		// 2. Your original logic
 		var p int
+		// If this function panics, execution jumps immediately to the defer above
 		files := lib.DownloadGiven(url, start, end, &p)
 
-		// store results under lock, verify job still exists
 		jobsMu.Lock()
-		defer jobsMu.Unlock()
+		defer jobsMu.Unlock() // This handles unlocking even if code below crashes
+
 		for i := range jobs {
 			if jobs[i].ID == jobID {
 				jobs[i].Files = files
-				jobs[i].Progress = p //przez to progress jest albo 0 albo 100
+				jobs[i].Progress = p
 				break
 			}
 		}
@@ -145,6 +164,8 @@ func get_job_info(c *gin.Context) {
 }
 
 func main() {
+	gin.SetMode(gin.ReleaseMode)
+
 	loadKeyHash()
 	//fmt.Print("Hello World\n")
 	router := gin.Default()
@@ -159,5 +180,5 @@ func main() {
 		authorized.GET("/start_job/:id", start_job)
 		authorized.Static("/files", "./comics")
 	}
-	router.Run(":7684")
+	router.Run(":80")
 }
