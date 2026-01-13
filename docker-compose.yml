@@ -10,4 +10,5 @@ services:
     # If you want compose to build the image from the repo, replace image with:
     # build: .
     environment:
+      # place a SHA256 of your api key here
       - API_KEY_HASH=
