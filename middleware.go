@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -27,7 +28,7 @@ func loadKeyHash() {
 	*/
 	// Clean up whitespace/newlines
 	cleanHex := strings.TrimSpace(data)
-
+	slog.Info("Loaded api hash", "hash", cleanHex)
 	// Decode hex string back to bytes for comparison
 	decoded, err := hex.DecodeString(cleanHex)
 	if err != nil {

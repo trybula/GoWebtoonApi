@@ -3,12 +3,14 @@ package lib
 import (
 	"archive/zip"
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"image"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -34,6 +36,7 @@ type EpisodeBatch struct {
 	imgLinks []string
 	minEp    int
 	maxEp    int
+	num_err  bool
 }
 
 type ComicFile interface {
@@ -250,6 +253,7 @@ func getEpisodeBatches(url string, minEp, maxEp, epsPerBatch, delayMs int) []Epi
 			imgLinks: getImgLinksForEpisode(url, numRetries, delayMs),
 			minEp:    episodeNo(url),
 			maxEp:    episodeNo(url),
+			num_err:  false,
 		}}
 	} else {
 		// assume viewing set of episodes
@@ -274,6 +278,14 @@ func getEpisodeBatches(url string, minEp, maxEp, epsPerBatch, delayMs int) []Epi
 		}
 		println(fmt.Sprintf("fetching image links for episodes %d through %d", actualMinEp, actualMaxEp))
 
+		num_error := false
+
+		if actualMaxEp > len(allEpisodeLinks) {
+			//there might be a numbering error
+			fmt.Println("Looks like there are some missing numbers in episode numeration.")
+			num_error = true
+		}
+
 		var episodeBatches []EpisodeBatch
 		for start := 0; start < len(desiredEpisodeLinks); start += epsPerBatch {
 			end := start + epsPerBatch
@@ -284,6 +296,7 @@ func getEpisodeBatches(url string, minEp, maxEp, epsPerBatch, delayMs int) []Epi
 				imgLinks: getImgLinksForEpisodes(desiredEpisodeLinks[start:end], actualMaxEp, delayMs),
 				minEp:    episodeNo(desiredEpisodeLinks[start]),
 				maxEp:    episodeNo(desiredEpisodeLinks[end-1]),
+				num_err:  num_error, //have there been a numbering error?
 			})
 		}
 		return episodeBatches
@@ -447,11 +460,20 @@ func getOutFile(opts Opts, episodeBatch EpisodeBatch) string {
 	outURL = strings.Split(outURL, "?")[0]
 	outURL = strings.ReplaceAll(outURL, "/viewer", "")
 	outURL = strings.ReplaceAll(outURL, "/", "-")
-	if episodeBatch.minEp != episodeBatch.maxEp {
-		outURL = fmt.Sprintf("%s-epNo%d-epNo%d.%s", outURL, episodeBatch.minEp, episodeBatch.maxEp, opts.format)
+	if !episodeBatch.num_err {
+		if episodeBatch.minEp != episodeBatch.maxEp {
+			outURL = fmt.Sprintf("%s-epNo%d-epNo%d.%s", outURL, episodeBatch.minEp, episodeBatch.maxEp, opts.format)
+		} else {
+			outURL = fmt.Sprintf("%s-epNo%d.%s", outURL, episodeBatch.minEp, opts.format)
+		}
 	} else {
-		outURL = fmt.Sprintf("%s-epNo%d.%s", outURL, episodeBatch.minEp, opts.format)
+		if episodeBatch.minEp != episodeBatch.maxEp {
+			outURL = fmt.Sprintf("%s-epNo%d-epNo%d(NUM_ERROR).%s", outURL, episodeBatch.minEp, episodeBatch.maxEp, opts.format)
+		} else {
+			outURL = fmt.Sprintf("%s-epNo%d(NUM_ERROR).%s", outURL, episodeBatch.minEp, opts.format)
+		}
 	}
+
 	return outURL
 }
 
@@ -459,8 +481,28 @@ func isRateLimited(doc soup.Root) bool {
 	return strings.Contains(doc.HTML(), "429 Too Many Requests")
 }
 
+func update_progress(db *sql.DB, id int, new_prog int) {
+	sql := "UPDATE jobs SET Progress=? WHERE Id=?"
+	//_ = db.QueryRow(sql, new_prog, id)
+	if _, err := db.Exec(sql, new_prog, id); err != nil {
+		slog.Error("failed to update job", "id", id, "error", err.Error())
+	}
+	slog.Debug("Updated progress", "job_id", id, "new progress", new_prog)
+}
+
 // a function that downloads webtoon
-func DownloadGiven(url string, minep int, maxep int, progress *int) []string {
+func DownloadGiven(db *sql.DB, id int) {
+	//,url string, minep int, maxep int, progress *int
+	sql := `SELECT Url,Start,"End",Progress FROM jobs WHERE Id = ?`
+	row := db.QueryRow(sql, id)
+	var url string
+	var minep, maxep, progress int
+
+	err := row.Scan(&url, &minep, &maxep, &progress)
+	if err != nil {
+		slog.Warn("Error while requesting db", "Id", id, "error", err.Error())
+		return
+	}
 	if maxep == 0 {
 		maxep = math.MaxInt
 	}
@@ -488,7 +530,8 @@ func DownloadGiven(url string, minep int, maxep int, progress *int) []string {
 		if error == nil {
 			fmt.Printf("file %s does exist. Skipping downloading\n", outFile)
 			out_files = append(out_files, outFile)
-			*progress = 100
+			progress = 100
+			update_progress(db, id, progress)
 			continue
 		}
 
@@ -521,7 +564,8 @@ func DownloadGiven(url string, minep int, maxep int, progress *int) []string {
 					len(episodeBatch.imgLinks),
 				),
 			)
-			*progress = int(math.Floor(float64(idx+1) / float64(len(episodeBatch.imgLinks)) * 100))
+			progress = int(math.Floor(float64(idx+1) / float64(len(episodeBatch.imgLinks)) * 100))
+			update_progress(db, id, progress)
 		}
 		if err := ensureDir("comics"); err != nil {
 			fmt.Println("Directory creation failed with error: " + err.Error())
@@ -535,7 +579,17 @@ func DownloadGiven(url string, minep int, maxep int, progress *int) []string {
 		fmt.Println(fmt.Sprintf("saved to %s", outFile))
 		out_files = append(out_files, outFile)
 	}
-	return out_files
+	//return out_files
+	var str_out_files string = ""
+	for _, str := range out_files {
+		str_out_files += str + ";"
+	}
+	sql = "UPDATE jobs SET Files=?, Progress=100 WHERE Id=?"
+	_, err = db.Exec(sql, str_out_files, id)
+	if err != nil {
+		slog.Error("Error while updating job", "error", err.Error())
+	}
+	slog.Debug("Updated files", "job_id", id, "files", str_out_files)
 }
 
 func ensureDir(dirName string) error {
